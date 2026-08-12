@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Leak-Guard — Static Resource-Leak Detector</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+  :root{
+    --bg:#0a0e0c;
+    --panel:#101512;
+    --panel-2:#161d19;
+    --border:#26332c;
+    --green:#5eff9f;
+    --green-dim:#2f9e63;
+    --amber:#ffb454;
+    --red:#ff6b6b;
+    --text:#d9e6df;
+    --text-dim:#7c8f85;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'JetBrains Mono', monospace;
+    padding:32px 24px 48px;
+  }
+  .wrap{max-width:920px;margin:0 auto;}
+
+  .eyebrow{
+    font-size:12px;letter-spacing:0.18em;color:var(--green-dim);
+    text-transform:uppercase;margin-bottom:6px;
+  }
+  h1{
+    font-family:'Space Grotesk',sans-serif;
+    font-size:32px;font-weight:700;margin:0 0 4px;color:var(--text);
+    display:flex;align-items:center;gap:10px;
+  }
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--green);
+    box-shadow:0 0 8px var(--green);animation:pulse 1.8s ease-in-out infinite;}
+  @media (prefers-reduced-motion: no-preference){
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  }
+  .sub{color:var(--text-dim);font-size:13px;margin:0 0 28px;}
+
+  .panel{
+    background:var(--panel);border:1px solid var(--border);
+    border-radius:10px;padding:20px;margin-bottom:20px;
+  }
+  label{
+    display:block;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
+    color:var(--text-dim);margin-bottom:8px;
+  }
+  textarea{
+    width:100%;background:var(--panel-2);border:1px solid var(--border);
+    border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;
+    padding:12px;resize:vertical;line-height:1.6;min-height:220px;
+    white-space:pre;
+  }
+  textarea:focus{outline:1px solid var(--green-dim);}
+
+  button{
+    background:var(--green);color:#04140a;border:none;border-radius:6px;
+    padding:13px 22px;font-family:inherit;font-weight:700;font-size:13px;
+    letter-spacing:0.05em;text-transform:uppercase;cursor:pointer;margin-top:16px;
+  }
+  button:hover{background:#7dffb5;}
+  button:active{transform:translateY(1px);}
+  #err{color:var(--red);font-size:13px;margin-top:8px;display:none;}
+
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px;}
+  .metric{
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:16px;text-align:center;
+  }
+  .metric .val{font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:700;color:var(--green);}
+  .metric .lbl{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em;margin-top:4px;}
+  .metric.bad .val{color:var(--red);}
+
+  .finding{
+    background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--green-dim);
+    border-radius:8px;padding:14px 16px;margin-bottom:12px;
+  }
+  .finding.high{border-left-color:var(--red);}
+  .finding.medium{border-left-color:var(--amber);}
+  .f-head{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;}
+  .badge{
+    font-size:10px;font-weight:700;letter-spacing:0.06em;padding:3px 8px;border-radius:4px;
+    text-transform:uppercase;
+  }
+  .badge.high{background:rgba(255,107,107,0.15);color:var(--red);}
+  .badge.medium{background:rgba(255,180,84,0.15);color:var(--amber);}
+  .f-loc{color:var(--text-dim);font-size:12px;}
+  .f-note{font-size:13px;color:var(--text);margin-bottom:10px;}
+  .f-fix{background:var(--panel-2);border:1px solid var(--border);border-radius:6px;
+    padding:10px 12px;font-size:12px;color:var(--green);white-space:pre-wrap;line-height:1.6;}
+
+  .empty{color:var(--text-dim);font-size:13px;text-align:center;padding:24px 0;}
+  .clean{color:var(--green);font-size:14px;text-align:center;padding:24px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Live prototype</div>
+  <h1><span class="dot"></span>leak-guard<span style="color:var(--text-dim)">//</span>scanner</h1>
+  <p class="sub">Local AST-based static analysis — flags unclosed files, DB connections, and sockets before they ship. No API calls made during scanning.</p>
+
+  <div class="panel">
+    <label for="code">Python source code</label>
+    <textarea id="code" spellcheck="false">import sqlite3
+
+def export_users(db_path, out_path):
+    f = open(out_path, "w")
+    conn = sqlite3.connect(db_path)
+    for row in conn.execute("SELECT * FROM users"):
+        f.write(str(row))
+    return out_path
+
+def fetch_config(host, port):
+    import socket
+    s = socket.socket()
+    s.connect((host, port))
+    data = s.recv(4096)
+    s.close()
+    return data
+
+def safe_read(path):
+    with open(path) as f:
+        return f.read()</textarea>
+
+    <button id="run">Scan for leaks</button>
+    <div id="err">Paste some Python code first.</div>
+  </div>
+
+  <div id="results" style="display:none">
+    <div class="metrics">
+      <div class="metric"><div class="val" id="mLines">—</div><div class="lbl">Lines scanned</div></div>
+      <div class="metric bad"><div class="val" id="mHigh">—</div><div class="lbl">High severity</div></div>
+      <div class="metric"><div class="val" id="mMed">—</div><div class="lbl">Medium severity</div></div>
+    </div>
+    <div id="findings"></div>
+  </div>
+</div>
+
+<script>
+// Simplified client-side reimplementation of the leak_guard.py detection
+// logic (line/regex based instead of a full Python AST, so it can run
+// in-browser with zero dependencies). See leak_guard.py for the exact
+// AST-based version.
+
+const RESOURCE_RE = /^\s*([A-Za-z_]\w*)\s*=\s*(open\s*\(.*\)|[\w.]*connect\s*\(.*\)|socket\.socket\s*\(.*\)|[\w.]*socket\s*\(\s*\))\s*$/;
+const CLOSE_RE = (name) => new RegExp(`\\b${name}\\s*\\.\\s*close\\s*\\(`);
+const WITH_RE = /^\s*with\s+/;
+
+function resourceType(call){
+  if(/^open\s*\(/.test(call)) return "file handle";
+  if(/connect\s*\(/.test(call)) return "connection (db/socket)";
+  if(/socket\s*\(/.test(call)) return "raw socket";
+  return "resource";
+}
+
+function scanCode(code){
+  const lines = code.split("\n");
+  const findings = [];
+
+  lines.forEach((line, idx) => {
+    if(WITH_RE.test(line)) return; // already using safe `with` pattern
+
+    const m = line.match(RESOURCE_RE);
+    if(!m) return;
+    const varName = m[1];
+    const call = m[2];
+
+    // crude scope guess: look from this line to the next line at the
+    // same or lower indentation (or end of file) for a matching close()
+    const indent = line.match(/^\s*/)[0].length;
+    let scopeEnd = lines.length;
+    for(let j = idx + 1; j < lines.length; j++){
+      const l = lines[j];
+      if(l.trim() === "") continue;
+      const lIndent = l.match(/^\s*/)[0].length;
+      if(lIndent < indent){ scopeEnd = j; break; }
+    }
+    const scopeText = lines.slice(idx, scopeEnd).join("\n");
+
+    const closeRe = CLOSE_RE(varName);
+    const closed = closeRe.test(scopeText);
+    const finallyIdx = scopeText.search(/^\s*finally\s*:/m);
+    const closeIdx = scopeText.search(closeRe);
+    const closedInFinally = closed && finallyIdx !== -1 && closeIdx > finallyIdx;
+
+    if(closedInFinally) return; // safe
+
+    const severity = closed ? "MEDIUM" : "HIGH";
+    const note = closed
+      ? "closed, but not inside try/finally — leaks on exception"
+      : "never closed on any path";
+    const fix = `with ${call} as ${varName}:\n    ...  # move code using '${varName}' here`;
+
+    findings.push({
+      line: idx + 1,
+      var: varName,
+      type: resourceType(call),
+      severity,
+      note,
+      fix,
+    });
+  });
+
+  return findings;
+}
+
+document.getElementById('run').addEventListener('click', ()=>{
+  const code = document.getElementById('code').value;
+  const errEl = document.getElementById('err');
+
+  if(!code.trim()){
+    errEl.style.display='block';
+    document.getElementById('results').style.display='none';
+    return;
+  }
+  errEl.style.display='none';
+
+  const findings = scanCode(code);
+  const high = findings.filter(f=>f.severity==="HIGH").length;
+  const med = findings.filter(f=>f.severity==="MEDIUM").length;
+
+  document.getElementById('mLines').textContent = code.split("\n").length;
+  document.getElementById('mHigh').textContent = high;
+  document.getElementById('mMed').textContent = med;
+
+  const container = document.getElementById('findings');
+  if(findings.length === 0){
+    container.innerHTML = '<div class="clean">✅ No resource leaks detected.</div>';
+  } else {
+    container.innerHTML = findings.map(f => `
+      <div class="finding ${f.severity.toLowerCase()}">
+        <div class="f-head">
+          <span class="badge ${f.severity.toLowerCase()}">${f.severity}</span>
+          <span class="f-loc">line ${f.line} — '${f.var}' (${f.type})</span>
+        </div>
+        <div class="f-note">${f.note}</div>
+        <div class="f-fix">${f.fix.replace(/</g,"&lt;")}</div>
+      </div>
+    `).join("");
+  }
+
+  document.getElementById('results').style.display='block';
+});
+
+document.getElementById('run').click();
+</script>
+</body>
+</html>
