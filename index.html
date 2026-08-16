@@ -144,112 +144,137 @@ def safe_read(path):
 </div>
 
 <script>
-// Simplified client-side reimplementation of the leak_guard.py detection
-// logic (line/regex based instead of a full Python AST, so it can run
-// in-browser with zero dependencies). See leak_guard.py for the exact
-// AST-based version.
+const RESOURCE_RE =
+  /^\s*([A-Za-z_]\w*)\s*=\s*(open\s*\(.*\)|[\w.]*connect\s*\(.*\)|socket\.socket\s*\(.*\)|[\w.]*socket\s*\(\s*\))\s*$/;
 
-const RESOURCE_RE = /^\s*([A-Za-z_]\w*)\s*=\s*(open\s*\(.*\)|[\w.]*connect\s*\(.*\)|socket\.socket\s*\(.*\)|[\w.]*socket\s*\(\s*\))\s*$/;
-const CLOSE_RE = (name) => new RegExp(`\\b${name}\\s*\\.\\s*close\\s*\\(`);
-const WITH_RE = /^\s*with\s+/;
-
-function resourceType(call){
-  if(/^open\s*\(/.test(call)) return "file handle";
-  if(/connect\s*\(/.test(call)) return "connection (db/socket)";
-  if(/socket\s*\(/.test(call)) return "raw socket";
+function resourceType(call) {
+  if (/^open\s*\(/.test(call)) return "file handle";
+  if (/connect\s*\(/.test(call)) return "connection (db/socket)";
+  if (/socket\s*\(/.test(call)) return "raw socket";
   return "resource";
 }
 
-function scanCode(code){
-  const lines = code.split("\n");
+function scanCode(code) {
+  const lines = code.split(/\r?\n/);
   const findings = [];
 
-  lines.forEach((line, idx) => {
-    if(WITH_RE.test(line)) return; // already using safe `with` pattern
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
 
-    const m = line.match(RESOURCE_RE);
-    if(!m) return;
-    const varName = m[1];
-    const call = m[2];
+    // `with open(...) as f:` is already safely managed.
+    if (/^\s*with\s+/.test(line)) continue;
 
-    // crude scope guess: look from this line to the next line at the
-    // same or lower indentation (or end of file) for a matching close()
-    const indent = line.match(/^\s*/)[0].length;
+    const match = line.match(RESOURCE_RE);
+    if (!match) continue;
+
+    const varName = match[1];
+    const call = match[2];
+
+    // Find the end of the current function/block by indentation.
+    const indent = (line.match(/^\s*/) || [""])[0].length;
     let scopeEnd = lines.length;
-    for(let j = idx + 1; j < lines.length; j++){
-      const l = lines[j];
-      if(l.trim() === "") continue;
-      const lIndent = l.match(/^\s*/)[0].length;
-      if(lIndent < indent){ scopeEnd = j; break; }
+
+    for (let j = idx + 1; j < lines.length; j++) {
+      if (!lines[j].trim()) continue;
+      const nextIndent = (lines[j].match(/^\s*/) || [""])[0].length;
+      if (nextIndent < indent) {
+        scopeEnd = j;
+        break;
+      }
     }
+
     const scopeText = lines.slice(idx, scopeEnd).join("\n");
-
-    const closeRe = CLOSE_RE(varName);
+    const closeRe = new RegExp("\\b" + varName + "\\s*\\.\\s*close\\s*\\(");
     const closed = closeRe.test(scopeText);
+
     const finallyIdx = scopeText.search(/^\s*finally\s*:/m);
-    const closeIdx = scopeText.search(closeRe);
-    const closedInFinally = closed && finallyIdx !== -1 && closeIdx > finallyIdx;
+    const closeMatch = scopeText.match(closeRe);
+    const closeIdx = closeMatch ? closeMatch.index : -1;
+    const closedInFinally =
+      closed && finallyIdx !== -1 && closeIdx > finallyIdx;
 
-    if(closedInFinally) return; // safe
-
-    const severity = closed ? "MEDIUM" : "HIGH";
-    const note = closed
-      ? "closed, but not inside try/finally — leaks on exception"
-      : "never closed on any path";
-    const fix = `with ${call} as ${varName}:\n    ...  # move code using '${varName}' here`;
+    if (closedInFinally) continue;
 
     findings.push({
       line: idx + 1,
       var: varName,
       type: resourceType(call),
-      severity,
-      note,
-      fix,
+      severity: closed ? "MEDIUM" : "HIGH",
+      note: closed
+        ? "closed, but not inside try/finally — leaks on exception"
+        : "never closed on any path",
+      fix:
+        "with " + call + " as " + varName +
+        ":\n    ...  # move code using '" + varName + "' here"
     });
-  });
+  }
 
   return findings;
 }
 
-document.getElementById('run').addEventListener('click', ()=>{
-  const code = document.getElementById('code').value;
-  const errEl = document.getElementById('err');
+function renderResults(code) {
+  const errEl = document.getElementById("err");
+  const results = document.getElementById("results");
 
-  if(!code.trim()){
-    errEl.style.display='block';
-    document.getElementById('results').style.display='none';
+  if (!code.trim()) {
+    errEl.style.display = "block";
+    results.style.display = "none";
     return;
   }
-  errEl.style.display='none';
+
+  errEl.style.display = "none";
 
   const findings = scanCode(code);
-  const high = findings.filter(f=>f.severity==="HIGH").length;
-  const med = findings.filter(f=>f.severity==="MEDIUM").length;
+  const high = findings.filter(f => f.severity === "HIGH").length;
+  const med = findings.filter(f => f.severity === "MEDIUM").length;
 
-  document.getElementById('mLines').textContent = code.split("\n").length;
-  document.getElementById('mHigh').textContent = high;
-  document.getElementById('mMed').textContent = med;
+  document.getElementById("mLines").textContent = code.split(/\r?\n/).length;
+  document.getElementById("mHigh").textContent = high;
+  document.getElementById("mMed").textContent = med;
 
-  const container = document.getElementById('findings');
-  if(findings.length === 0){
-    container.innerHTML = '<div class="clean">✅ No resource leaks detected.</div>';
+  const container = document.getElementById("findings");
+
+  if (!findings.length) {
+    container.innerHTML =
+      '<div class="clean">✓ No resource leaks detected.</div>';
   } else {
-    container.innerHTML = findings.map(f => `
-      <div class="finding ${f.severity.toLowerCase()}">
-        <div class="f-head">
-          <span class="badge ${f.severity.toLowerCase()}">${f.severity}</span>
-          <span class="f-loc">line ${f.line} — '${f.var}' (${f.type})</span>
-        </div>
-        <div class="f-note">${f.note}</div>
-        <div class="f-fix">${f.fix.replace(/</g,"&lt;")}</div>
-      </div>
-    `).join("");
+    container.innerHTML = findings.map(f => {
+      const safeFix = f.fix
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+      return `
+        <div class="finding ${f.severity.toLowerCase()}">
+          <div class="f-head">
+            <span class="badge ${f.severity.toLowerCase()}">${f.severity}</span>
+            <span class="f-loc">line ${f.line} — '${f.var}' (${f.type})</span>
+          </div>
+          <div class="f-note">${f.note}</div>
+          <div class="f-fix">${safeFix}</div>
+        </div>`;
+    }).join("");
   }
 
-  document.getElementById('results').style.display='block';
-});
+  results.style.display = "block";
+}
 
-document.getElementById('run').click();
+document.addEventListener("DOMContentLoaded", function () {
+  const button = document.getElementById("run");
+  const codeBox = document.getElementById("code");
+
+  if (!button || !codeBox) {
+    console.error("Leak-Guard: required elements not found.");
+    return;
+  }
+
+  button.addEventListener("click", function () {
+    renderResults(codeBox.value);
+  });
+
+  // Show the sample scan when the page loads.
+  renderResults(codeBox.value);
+});
 </script>
 </body>
 </html>
